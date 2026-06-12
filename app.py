@@ -1,20 +1,14 @@
 import streamlit as st
 import pdfplumber
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import json
 import re
 
-# ── Page config ──────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="FactCheck Agent",
-    page_icon="🔍",
-    layout="wide",
-)
-
+st.set_page_config(page_title="FactCheck Agent", page_icon="🔍", layout="wide")
 st.title("🔍 Fact-Check Agent")
 st.caption("Upload a PDF → AI extracts claims → Google-powered verification → Truth report")
 
-# ── Sidebar: API keys ─────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("🔑 API Key")
     gemini_key = st.text_input(
@@ -26,10 +20,7 @@ with st.sidebar:
     max_claims = st.slider("Max claims to verify", 3, 15, 8)
     st.info("Gemini free tier: 1500 requests/day")
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
 def extract_text_from_pdf(uploaded_file) -> str:
-    """Extract all text from uploaded PDF."""
     text = ""
     with pdfplumber.open(uploaded_file) as pdf:
         for page in pdf.pages:
@@ -38,9 +29,7 @@ def extract_text_from_pdf(uploaded_file) -> str:
                 text += page_text + "\n"
     return text.strip()
 
-
-def extract_claims(text: str, model, max_claims: int) -> list[dict]:
-    """Use Gemini to pull out verifiable factual claims."""
+def extract_claims(text: str, client, max_claims: int) -> list:
     prompt = f"""You are a fact-checking assistant. From the text below, extract up to {max_claims} specific, verifiable claims. Focus on:
 - Statistics and percentages
 - Named dates and years
@@ -56,21 +45,19 @@ TEXT:
 
 Return ONLY the JSON array, no markdown, no explanation."""
 
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model="gemini-2.0-flash-lite",
+        contents=prompt
+    )
     raw = response.text.strip()
     raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
     return json.loads(raw)
 
+def verify_claim(claim: str, search_query: str, client) -> dict:
+    prompt = f"""You are a fact-checker. Search the web and evaluate this claim: "{claim}"
+Search for: "{search_query}"
 
-def verify_claim(claim: str, search_query: str, model_with_search) -> dict:
-    """Search the web using Gemini's built-in Google Search tool and evaluate the claim."""
-    prompt = f"""You are a fact-checker with access to Google Search.
-
-Search the web for: "{search_query}"
-
-Then evaluate this claim: "{claim}"
-
-Based on what you find, respond with ONLY a valid JSON object:
+Respond with ONLY a valid JSON object:
 {{
   "status": "Verified" | "Inaccurate" | "False" | "Unverifiable",
   "explanation": "1-2 sentences explaining your verdict with actual data found",
@@ -78,16 +65,16 @@ Based on what you find, respond with ONLY a valid JSON object:
   "source": "URL or source name where you found the info"
 }}
 
-Definitions:
-- Verified: evidence clearly confirms the claim
-- Inaccurate: directionally right but figures/dates are wrong or outdated
-- False: evidence contradicts the claim
-- Unverifiable: insufficient evidence found
-
 Return ONLY the JSON object."""
 
     try:
-        response = model_with_search.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
+        )
         raw = response.text.strip()
         raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
         return json.loads(raw)
@@ -99,10 +86,8 @@ Return ONLY the JSON object."""
             "source": ""
         }
 
-
 STATUS_EMOJI = {"Verified": "✅", "Inaccurate": "⚠️", "False": "❌", "Unverifiable": "❓"}
 STATUS_COLOR = {"Verified": "green", "Inaccurate": "orange", "False": "red", "Unverifiable": "gray"}
-
 
 def render_result(i: int, claim: str, verdict: dict):
     status = verdict.get("status", "Unverifiable")
@@ -117,38 +102,23 @@ def render_result(i: int, claim: str, verdict: dict):
         if src:
             st.markdown(f"**Source:** {src}")
 
-
-# ── Main UI ───────────────────────────────────────────────────────────────────
-
 uploaded_file = st.file_uploader("Upload a PDF document", type=["pdf"])
 
 if uploaded_file and st.button("🚀 Run Fact-Check", type="primary"):
-
     if not gemini_key:
         st.error("Please enter your Gemini API key in the sidebar.")
         st.stop()
 
-    # Init Gemini
-    genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
-    
-    # FIXED Syntax for search tools initialization
-    model_with_search = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        tools={"google_search": {}}
-    )
+    client = genai.Client(api_key=gemini_key)
 
-    # Step 1 — Extract PDF text
     with st.status("📄 Extracting text from PDF…", expanded=True) as status:
         pdf_text = extract_text_from_pdf(uploaded_file)
         if not pdf_text:
             st.error("Could not extract text. Is this a scanned/image PDF?")
             st.stop()
         st.write(f"Extracted {len(pdf_text):,} characters from {uploaded_file.name}")
-
-        # Step 2 — Extract claims
         status.update(label="🧠 Identifying verifiable claims…")
-        claims = extract_claims(pdf_text, model, max_claims)
+        claims = extract_claims(pdf_text, client, max_claims)
         st.write(f"Found **{len(claims)}** claims to verify")
         status.update(label=f"🌐 Verifying {len(claims)} claims via Google Search…")
 
@@ -162,9 +132,8 @@ if uploaded_file and st.button("🚀 Run Fact-Check", type="primary"):
     for i, item in enumerate(claims, 1):
         claim = item.get("claim", "")
         query = item.get("search_query", claim)
-        verdict = verify_claim(claim, query, model_with_search)
+        verdict = verify_claim(claim, query, client)
         results.append((claim, verdict))
-        
         key = verdict.get("status", "Unverifiable")
         if key not in counters:
             key = "Unverifiable"
@@ -172,7 +141,6 @@ if uploaded_file and st.button("🚀 Run Fact-Check", type="primary"):
         progress.progress(i / len(claims), text=f"Verified {i}/{len(claims)}")
 
     progress.empty()
-
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("✅ Verified", counters["Verified"])
     col2.metric("⚠️ Inaccurate", counters["Inaccurate"])
