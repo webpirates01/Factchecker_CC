@@ -3,7 +3,7 @@
 An AI-powered web app that extracts verifiable claims from any PDF and checks each one using Groq's Llama 3.3 — completely free, no credit card required.
 
 ## Live Demo
-👉 **[https://webpirates01-factchecker-cc-app-pg5xxh.streamlit.app/]** *(replace after deploy)*
+👉 **[https://webpirates01-factchecker-cc-app-pg5xxh.streamlit.app/]**
 
 ## How It Works
 1. User uploads a PDF document
